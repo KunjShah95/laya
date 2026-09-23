@@ -198,7 +198,18 @@ def _iter_text(state: Union[str, dict, list, None], _depth: int = 0) -> List[str
 
 def state_text(state: Union[str, dict, list, None], max_chars: int = 4000) -> str:
     """Flatten a state into the text used for detection (keys are ignored: they are usually English)."""
-    return " ".join(_iter_text(state))[:max_chars]
+    parts: List[str] = []
+    budget = max_chars
+    for leaf in _iter_text(state):
+        if budget <= 0:
+            break
+        if len(leaf) > budget:
+            parts.append(leaf[:budget])
+            break
+        parts.append(leaf)
+        # Account for the joining space without materializing the full text first.
+        budget -= len(leaf) + 1
+    return " ".join(parts)[:max_chars]
 
 
 def detect_script(text: str) -> str:
