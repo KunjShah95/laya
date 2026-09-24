@@ -199,6 +199,72 @@ def test_fast_path_rejects_sequences_over_its_capacity():
         raise AssertionError("oversized fast-path request was accepted")
 
 
+def test_fast_path_oom_restores_stock_forward_before_cpu_retry(monkeypatch):
+    import threading
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    import torch
+
+    import laya.agent as agent_module
+    from laya.agent import Agent
+
+    class FakeTensor:
+        shape = (1, 2)
+
+        def to(self, device):
+            return self
+
+    class FakeModel:
+        def __init__(self, stock):
+            self._stock = stock
+            self.forward = stock
+            self.devices = []
+
+        def __call__(self, *args):
+            return self.forward(*args)
+
+        def to(self, device):
+            self.devices.append(device)
+            return self
+
+    class FakeFast:
+        max_len = 8
+        _forward_lock = threading.RLock()
+
+        @staticmethod
+        def forward(*_args):
+            raise RuntimeError("CUDA out of memory")
+
+    calls = []
+
+    def stock(*_args):
+        calls.append("stock")
+        return "cpu-result"
+
+    model = FakeModel(stock)
+    fast = FakeFast()
+    model.forward = fast.forward
+    agent = Agent.__new__(Agent)
+    agent._fast = fast
+    agent._stock_forward = stock
+    agent.model = model
+    agent.device = torch.device("cuda")
+    agent.dtype = torch.float16
+    agent.amp_enabled = True
+    agent.mps_amp_min_rows = 5
+    batch = {key: FakeTensor() for key in (
+        "input_ids", "attention_mask", "marker_pos", "marker_mask", "qtype"
+    )}
+    monkeypatch.setattr(agent_module, "_amp_context", lambda *_args: nullcontext())
+
+    assert agent._infer(batch) == "cpu-result"
+    assert agent.device == torch.device("cpu")
+    assert agent._fast is None
+    assert calls == ["stock"]
+    assert model.devices == [torch.device("cpu")]
+
+
 def test_fast_top_two_handles_one_option():
     import pytest
     pytest.importorskip("tilelang")

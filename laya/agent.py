@@ -620,30 +620,41 @@ class Agent(HookRegistry):
                     b["qtype"].to(self.device),
                 )
 
+        # FastLaya.forward uses this same re-entrant lock for its CUDA graph
+        # buffers.  Hold it across the entire fast-path call *and* the fallback
+        # transition; otherwise another thread could enter the graph between
+        # the OOM and deaccelerate(), or while the model is being moved to CPU.
+        fast_lock = getattr(self._fast, "_forward_lock", None) if self._fast is not None else None
+        if fast_lock is not None:
+            fast_lock.acquire()
         try:
-            return run()
-        except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
-            low = str(e).lower()
-            if self.device.type != "cpu" and ("memory" in low or "cuda" in low):
-                print("Warning: GPU memory exceeded during inference. Falling back to CPU...")
-                # FastLaya keeps copied CUDA weights and replaces model.forward.  Move
-                # the model first without that replacement, or the retry would still
-                # execute on the failed CUDA fast path.
-                self.deaccelerate()
-                self.device = torch.device("cpu")
-                self.dtype = torch.float32
-                self.amp_enabled = False
-                self.model.to(self.device)
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+            try:
                 return run()
-            if use_amp and self.device.type in ("mps", "cpu"):
-                # Not every MPS/CPU build implements autocast for every op. Drop to full
-                # precision once rather than failing the request.
-                self.amp_enabled = False
-                self.dtype = torch.float32
-                return run()
-            raise
+            except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                low = str(e).lower()
+                if self.device.type != "cpu" and ("memory" in low or "cuda" in low):
+                    print("Warning: GPU memory exceeded during inference. Falling back to CPU...")
+                    # FastLaya keeps copied CUDA weights and replaces model.forward.  Move
+                    # the model first without that replacement, or the retry would still
+                    # execute on the failed CUDA fast path.
+                    self.deaccelerate()
+                    self.device = torch.device("cpu")
+                    self.dtype = torch.float32
+                    self.amp_enabled = False
+                    self.model.to(self.device)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    return run()
+                if use_amp and self.device.type in ("mps", "cpu"):
+                    # Not every MPS/CPU build implements autocast for every op. Drop to full
+                    # precision once rather than failing the request.
+                    self.amp_enabled = False
+                    self.dtype = torch.float32
+                    return run()
+                raise
+        finally:
+            if fast_lock is not None:
+                fast_lock.release()
 
     def _forward(self, b: Dict):
         """Run the model on a collated batch, with the GPU->CPU OOM fallback, and return numpy outputs."""
