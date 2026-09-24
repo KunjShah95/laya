@@ -80,9 +80,12 @@ function pickOutput(out: Record<string, any>, names: string[]): any {
   return vals[0];
 }
 
+export type DigestMap = Record<string, string>;
+
 export interface ProviderOptions {
   device?: string;
   numThreads?: number;
+  digests?: DigestMap;
 }
 
 function applyNumThreads(ort: any, numThreads?: number): void {
@@ -101,6 +104,42 @@ function applyNumThreads(ort: any, numThreads?: number): void {
 function isOomError(e: unknown): boolean {
   const m = String((e as any)?.message ?? e).toLowerCase();
   return m.includes("memory") || m.includes("cuda") || m.includes("out of memory") || m.includes("oom");
+}
+
+function digestMap(value?: DigestMap): DigestMap {
+  let raw = value;
+  if (!raw && typeof process !== "undefined") {
+    const env = (process as any).env?.["LAYA_SHA256_DIGESTS"];
+    if (env) raw = JSON.parse(env) as DigestMap;
+  }
+  const result: DigestMap = {};
+  for (const [key, expectedRaw] of Object.entries(raw ?? {})) {
+    const expected = String(expectedRaw).trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(expected)) {
+      throw new Error(`SHA-256 digest for ${key} must contain exactly 64 hexadecimal characters`);
+    }
+    result[key.replaceAll("\\", "/")] = expected;
+  }
+  return result;
+}
+
+function digestFor(digests: DigestMap, path: string): string | undefined {
+  const normalized = path.replaceAll("\\", "/");
+  return digests[normalized] ?? digests[path] ??
+    (normalized === "rl_agent_config.json" ? digests.config : undefined) ??
+    (normalized === "model.safetensors" ? digests.weights : undefined) ??
+    (normalized === "tokenizer/tokenizer.json" ? digests.tokenizer : undefined) ??
+    (normalized === "encoder.onnx" ? digests.encoder : undefined) ??
+    (normalized === "head.onnx" ? digests.head : undefined);
+}
+
+async function verifyBytes(data: ArrayBuffer | Uint8Array, expected: string | undefined, name: string): Promise<void> {
+  if (!expected) return;
+  const subtle = (globalThis as any).crypto?.subtle;
+  if (!subtle) throw new Error("SHA-256 verification requires Web Crypto support");
+  const digest = await subtle.digest("SHA-256", data);
+  const actual = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  if (actual !== expected) throw new Error(`SHA-256 mismatch for ${name}`);
 }
 
 /** Online-first fetch: try network, cache on success, fall back to CacheStorage. */
@@ -159,8 +198,9 @@ async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
   return await res.arrayBuffer();
 }
 
-async function fetchJson(url: string): Promise<unknown> {
+async function fetchJson(url: string, expected?: string): Promise<unknown> {
   const buf = await fetchArrayBuffer(url);
+  await verifyBytes(buf, expected, url);
   return JSON.parse(new TextDecoder().decode(buf));
 }
 
@@ -172,12 +212,13 @@ export interface NodeBundle {
 
 export async function loadNodeBundle(
   modelDirOrRepo: string,
-  opts?: { subfolder?: string | null; localDir?: string; token?: string | null },
+  opts?: { subfolder?: string | null; localDir?: string; token?: string | null; revision?: string | null; digests?: DigestMap },
 ): Promise<NodeBundle> {
   const fs: typeof import("node:fs/promises") = await import("node:fs/promises");
   const path: typeof import("node:path") = await import("node:path");
   const os: typeof import("node:os") = await import("node:os");
   const sub = opts?.subfolder ?? null;
+  const digests = digestMap(opts?.digests);
   let dir = opts?.localDir ?? modelDirOrRepo;
   try {
     const st = await fs.stat(sub ? path.join(dir, sub) : dir);
@@ -197,9 +238,11 @@ export async function loadNodeBundle(
       opts?.token ?? (typeof process !== "undefined" ? (process as any).env?.["HF_TOKEN"] : undefined);
     for (const f of ["rl_agent_config.json", "tokenizer.json", "tokenizer/tokenizer.json", "encoder.onnx", "head.onnx"]) {
       try {
-        await fs.stat(path.join(cache, f));
+        const cached = path.join(cache, f);
+        await fs.stat(cached);
+        await verifyBytes(await fs.readFile(cached), digestFor(digests, f), f);
       } catch {
-        const url = `https://huggingface.co/${modelDirOrRepo}/resolve/main/${sub ? sub + "/" : ""}${f}`;
+        const url = `https://huggingface.co/${modelDirOrRepo}/resolve/${opts?.revision ?? "main"}/${sub ? sub + "/" : ""}${f}`;
         const res = await fetch(url, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
         if (!res.ok) {
           if (f === "rl_agent_config.json") {
@@ -210,28 +253,42 @@ export async function loadNodeBundle(
           continue;
         }
         const target = path.join(cache, f);
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        await verifyBytes(bytes, digestFor(digests, f), f);
         await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, new Uint8Array(await res.arrayBuffer()));
+        await fs.writeFile(target, bytes);
       }
     }
     dir = cache;
   }
   let cfg: any = {};
+  const configPath = path.join(dir, "rl_agent_config.json");
+  let configBytes: Uint8Array;
   try {
-    cfg = JSON.parse(await fs.readFile(path.join(dir, "rl_agent_config.json"), "utf8"));
+    configBytes = await fs.readFile(configPath);
   } catch {
     throw new Error(
       `Incompatible model: ${JSON.stringify(modelDirOrRepo)} does not contain 'rl_agent_config.json'.`,
     );
   }
+  await verifyBytes(configBytes, digestFor(digests, "rl_agent_config.json"), "rl_agent_config.json");
+  try {
+    cfg = JSON.parse(new TextDecoder().decode(configBytes));
+  } catch {
+    throw new Error(`Incompatible model: ${JSON.stringify(modelDirOrRepo)} has invalid 'rl_agent_config.json'.`);
+  }
   let tokenizerJson: unknown | null = null;
   for (const candidate of ["tokenizer.json", "tokenizer/tokenizer.json"]) {
+    let tokenizerBytes: Uint8Array;
     try {
-      tokenizerJson = JSON.parse(await fs.readFile(path.join(dir, candidate), "utf8"));
-      break;
+      tokenizerBytes = await fs.readFile(path.join(dir, candidate));
     } catch {
       // Try the next supported Hugging Face layout.
+      continue;
     }
+    await verifyBytes(tokenizerBytes, digestFor(digests, candidate), candidate);
+    tokenizerJson = JSON.parse(new TextDecoder().decode(tokenizerBytes));
+    break;
   }
   return { dir, cfg, tokenizerJson };
 }
@@ -242,31 +299,34 @@ export interface WebBundle {
   tokenizerJson: unknown | null;
 }
 
-function baseUrlFor(repoOrUrl: string, subfolder?: string | null): string {
+function baseUrlFor(repoOrUrl: string, subfolder?: string | null, revision?: string | null): string {
   const sub = subfolder ? `/${subfolder.replace(/^\/+|\/+$/g, "")}` : "";
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(repoOrUrl)) {
     return `${repoOrUrl.replace(/\/+$/, "")}${sub}`;
   }
-  return `https://huggingface.co/${repoOrUrl}/resolve/main${sub}`;
+  return `https://huggingface.co/${repoOrUrl}/resolve/${revision ?? "main"}${sub}`;
 }
 
 export async function loadWebBundle(
   repoOrUrl: string,
-  opts?: { subfolder?: string | null },
+  opts?: { subfolder?: string | null; revision?: string | null; digests?: DigestMap },
 ): Promise<WebBundle> {
-  const base = baseUrlFor(repoOrUrl, opts?.subfolder ?? null);
+  const base = baseUrlFor(repoOrUrl, opts?.subfolder ?? null, opts?.revision ?? null);
+  const digests = digestMap(opts?.digests);
   let cfg: any;
   try {
-    cfg = await fetchJson(`${base}/rl_agent_config.json`);
-  } catch {
+    cfg = await fetchJson(`${base}/rl_agent_config.json`, digestFor(digests, "rl_agent_config.json"));
+  } catch (e) {
+    if (String((e as any)?.message ?? e).includes("SHA-256 mismatch")) throw e;
     throw new Error(`Incompatible model: ${JSON.stringify(repoOrUrl)} does not contain 'rl_agent_config.json'.`);
   }
   let tokenizerJson: unknown | null = null;
   for (const candidate of ["tokenizer.json", "tokenizer/tokenizer.json"]) {
     try {
-      tokenizerJson = await fetchJson(`${base}/${candidate}`);
+      tokenizerJson = await fetchJson(`${base}/${candidate}`, digestFor(digests, candidate));
       break;
-    } catch {
+    } catch (e) {
+      if (String((e as any)?.message ?? e).includes("SHA-256 mismatch")) throw e;
       // Try the next supported Hugging Face layout.
     }
   }
@@ -280,6 +340,7 @@ export async function createNodeProvider(
   const spec = "onnxruntime-" + "node";
   const ort: any = await import(/* @vite-ignore */ spec);
   applyNumThreads(ort, opts?.numThreads);
+  const digests = digestMap(opts?.digests);
   try {
     const fs: typeof import("node:fs/promises") = await import("node:fs/promises");
     const path: typeof import("node:path") = await import("node:path");
@@ -290,6 +351,7 @@ export async function createNodeProvider(
       } catch {
         throw new Error(`Incompatible model: '${f}' not found in ${JSON.stringify(modelDir)} (expected ${p}).`);
       }
+      await verifyBytes(await fs.readFile(p), digestFor(digests, f), f);
     }
   } catch (e) {
     if (e instanceof Error && e.message.includes("not found in")) throw e;
@@ -375,6 +437,7 @@ export async function createWebProvider(
   const spec = "onnxruntime-" + "web";
   const ort: any = await import(/* @vite-ignore */ spec);
   applyNumThreads(ort, opts?.numThreads);
+  const digests = digestMap(opts?.digests);
   const base = modelUrl.replace(/\/+$/, "");
   const encUrl = `${base}/encoder.onnx`;
   const headUrl = `${base}/head.onnx`;
@@ -384,12 +447,14 @@ export async function createWebProvider(
   } catch {
     throw new Error(`Incompatible model: 'encoder.onnx' not found (expected ${encUrl}).`);
   }
+  await verifyBytes(encBuf, digestFor(digests, "encoder.onnx"), "encoder.onnx");
   let headBuf: ArrayBuffer;
   try {
     headBuf = await fetchArrayBuffer(headUrl);
   } catch {
     throw new Error(`Incompatible model: 'head.onnx' not found (expected ${headUrl}).`);
   }
+  await verifyBytes(headBuf, digestFor(digests, "head.onnx"), "head.onnx");
   let enc: any;
   try {
     enc = await ort.InferenceSession.create(new Uint8Array(encBuf), {

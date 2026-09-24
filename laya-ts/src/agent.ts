@@ -11,7 +11,7 @@ import {
   softmax,
   tempBucket,
 } from "./common.js";
-import type { Batch, SessionProvider } from "./providers.js";
+import type { Batch, SessionProvider, DigestMap } from "./providers.js";
 import { encodeWithData, parseTokenizerJson, type TokenizerLike } from "./tokenizer.js";
 import {
   HookRegistry,
@@ -448,6 +448,8 @@ export class Agent extends HookRegistry {
       subfolder?: string | null;
       localDir?: string;
       token?: string | null;
+      revision?: string | null;
+      digests?: DigestMap;
       numThreads?: number;
     },
   ): Promise<Agent> {
@@ -460,22 +462,30 @@ export class Agent extends HookRegistry {
     let provider: SessionProvider;
     if (isBrowser) {
       const { loadWebBundle, createWebProvider } = await import("./providers.js");
-      const bundle = await loadWebBundle(modelDirOrRepo, { subfolder: sub });
+      const bundle = await loadWebBundle(modelDirOrRepo, {
+        subfolder: sub, revision: opts?.revision, digests: opts?.digests,
+      });
       cfg = bundle.cfg;
       tokenizerJson = bundle.tokenizerJson;
       dir = bundle.dir;
-      provider = await createWebProvider(dir, { numThreads: opts?.numThreads });
+      provider = await createWebProvider(dir, {
+        numThreads: opts?.numThreads, digests: opts?.digests,
+      });
     } else {
       const { loadNodeBundle, createNodeProvider } = await import("./providers.js");
       const bundle = await loadNodeBundle(modelDirOrRepo, {
         subfolder: sub,
         localDir: opts?.localDir,
         token: opts?.token,
+        revision: opts?.revision,
+        digests: opts?.digests,
       });
       cfg = bundle.cfg;
       tokenizerJson = bundle.tokenizerJson;
       dir = bundle.dir;
-      provider = await createNodeProvider(dir, { device: opts?.device, numThreads: opts?.numThreads });
+      provider = await createNodeProvider(dir, {
+        device: opts?.device, numThreads: opts?.numThreads, digests: opts?.digests,
+      });
     }
     if (!tokenizerJson) {
       throw new Error(

@@ -19,6 +19,7 @@ from laya.common import (
     TEMP_MAX,
     clamp_temperature,
 )
+from laya.model_integrity import default_revision, verify_artifacts
 
 
 class ONNXAgent(HookRegistry):
@@ -36,6 +37,8 @@ class ONNXAgent(HookRegistry):
         model_id_or_path: str,
         onnx_path: str = "laya.onnx",
         subfolder: Optional[str] = None,
+        revision: Optional[str] = None,
+        digests: Optional[Dict[str, str]] = None,
         hooks=None,
         on_predict_start=None,
         on_predict_end=None,
@@ -59,6 +62,7 @@ class ONNXAgent(HookRegistry):
         self._hooks_lock = threading.RLock() if not hooks_concurrent else None
         self._hooks_mutex = threading.Lock()
         self.model_id = model_id_or_path
+        self.revision = revision or default_revision(model_id_or_path, subfolder)
 
         import onnxruntime as ort
         from transformers import AutoTokenizer
@@ -76,6 +80,7 @@ class ONNXAgent(HookRegistry):
                 "allow_patterns": [prefix + name for name in (
                     "rl_agent_config.json", "tokenizer/*", "encoder/*",
                 )],
+                "revision": self.revision,
             }
             model_dir = snapshot_download(model_id_or_path, **kw)
 
@@ -86,6 +91,7 @@ class ONNXAgent(HookRegistry):
                     f"Subfolder {subfolder!r} not found in {model_id_or_path!r}."
                 )
 
+        verify_artifacts(model_dir, digests, onnx_path=onnx_path)
         cfg_path = os.path.join(model_dir, "rl_agent_config.json")
         if not os.path.exists(cfg_path):
             raise FileNotFoundError(

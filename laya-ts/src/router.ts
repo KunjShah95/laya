@@ -16,18 +16,19 @@ export const BUNDLE_REPO = "convaiinnovations/laya";
 export interface ModelSpec {
   repo: string;
   subfolder: string | null;
+  revision?: string | null;
 }
 
 export const DEFAULT_MODELS: Record<string, ModelSpec> = {
-  english: { repo: BUNDLE_REPO, subfolder: null },
-  multilingual: { repo: BUNDLE_REPO, subfolder: "multilingual" },
-  "typed-decisions": { repo: BUNDLE_REPO, subfolder: "typed-decisions" },
+  english: { repo: BUNDLE_REPO, subfolder: null, revision: "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851" },
+  multilingual: { repo: BUNDLE_REPO, subfolder: "multilingual", revision: "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851" },
+  "typed-decisions": { repo: BUNDLE_REPO, subfolder: "typed-decisions", revision: "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851" },
 };
 
-export const STANDALONE_MODELS: Record<string, string> = {
-  english: "convaiinnovations/laya",
-  multilingual: "convaiinnovations/laya-multilingual",
-  "typed-decisions": "convaiinnovations/laya-typed-decisions",
+export const STANDALONE_MODELS: Record<string, ModelSpec> = {
+  english: { repo: "convaiinnovations/laya", subfolder: null, revision: "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851" },
+  multilingual: { repo: "convaiinnovations/laya-multilingual", subfolder: null, revision: "e4e9ddf21a7b1903b7acffd8814ad4307bf63a67" },
+  "typed-decisions": { repo: "convaiinnovations/laya-typed-decisions", subfolder: null, revision: "1a793eb568e6718f15941d08f85432581df534e3" },
 };
 
 export type ModelName = "english" | "multilingual" | "typed-decisions";
@@ -108,6 +109,8 @@ export interface RouterOptions {
   models?: Record<string, string | ModelSpec | [string, string | null]>;
   device?: string | null;
   token?: string | null;
+  revision?: string | null;
+  digests?: Record<string, Record<string, string>>;
   maxLoaded?: number;
   max_loaded?: number;
   default?: string;
@@ -141,7 +144,7 @@ function toSpec(spec: string | ModelSpec | [string, string | null]): ModelSpec {
     const [repo, sub] = [...spec, null].slice(0, 2) as [string, string | null];
     return { repo, subfolder: sub ?? null };
   }
-  return { repo: spec.repo, subfolder: spec.subfolder ?? null };
+  return { repo: spec.repo, subfolder: spec.subfolder ?? null, revision: spec.revision ?? null };
 }
 
 function repoStr(spec: ModelSpec): string {
@@ -153,6 +156,8 @@ export class Router extends HookRegistry {
   models: Record<string, ModelSpec>;
   device: string | null;
   token: string | null | undefined;
+  revision: string | null;
+  digests: Record<string, Record<string, string>>;
   maxLoaded: number;
   default: ModelName;
   autoTaskDetection: boolean;
@@ -178,6 +183,8 @@ export class Router extends HookRegistry {
     }
     this.device = opts.device ?? null;
     this.token = opts.token ?? (typeof process !== "undefined" ? process.env?.["HF_TOKEN"] : undefined);
+    this.revision = opts.revision ?? null;
+    this.digests = { ...(opts.digests ?? {}) };
     this.maxLoaded = Math.max(1, Math.trunc(Number(opts.maxLoaded ?? opts.max_loaded ?? 2)));
     this.default = normaliseName(opts.default ?? "english");
     this.autoTaskDetection = Boolean(opts.autoTaskDetection ?? opts.auto_task_detection ?? false);
@@ -206,6 +213,8 @@ export class Router extends HookRegistry {
         load(repo: string, opts?: Record<string, unknown>): Promise<unknown>;
       }).load(spec.repo, {
         subfolder: spec.subfolder,
+        revision: this.revision ?? spec.revision ?? undefined,
+        digests: this.digests[key],
         device: this.device ?? undefined,
         token: this.token ?? undefined,
       });

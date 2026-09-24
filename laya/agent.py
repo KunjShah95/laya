@@ -28,6 +28,7 @@ from .common import (
     temp_bucket,
 )
 from .hooks import HookRegistry, PredictContext, aggregate_usage, compose_hooks, dispatch, normalise_hooks
+from .model_integrity import default_revision, verify_artifacts
 
 
 def _fix_tokenizer_config(path: str):
@@ -214,6 +215,8 @@ class Agent(HookRegistry):
         device: Optional[str] = None,
         token: Optional[str] = None,
         subfolder: Optional[str] = None,
+        revision: Optional[str] = None,
+        digests: Optional[Dict[str, str]] = None,
         fast: bool = False,
         compile: bool = False,
         lang_temperatures: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -242,6 +245,7 @@ class Agent(HookRegistry):
         self._hooks_lock = threading.RLock() if not hooks_concurrent else None
         self._hooks_mutex = threading.Lock()
         self.model_id = model_id_or_path
+        self.revision = revision or default_revision(model_id_or_path, subfolder)
 
         from safetensors.torch import load_file
         try:
@@ -266,6 +270,7 @@ class Agent(HookRegistry):
                 "allow_patterns": [prefix + name for name in (
                     "rl_agent_config.json", "model.safetensors", "tokenizer/*", "encoder/*",
                 )],
+                "revision": self.revision,
             }
             model_dir = snapshot_download(model_id_or_path, **kw)
 
@@ -276,6 +281,7 @@ class Agent(HookRegistry):
                     f"Subfolder {subfolder!r} not found in {model_id_or_path!r}."
                 )
 
+        verify_artifacts(model_dir, digests)
         _fix_tokenizer_config(model_dir)
 
         cfg_path = os.path.join(model_dir, "rl_agent_config.json")
@@ -910,7 +916,9 @@ RLAgent = Agent
 
 
 def load(model_id_or_path: str = "convaiinnovations/laya", device: Optional[str] = None,
-         token: Optional[str] = None, subfolder: Optional[str] = None, fast: bool = False,
+         token: Optional[str] = None, subfolder: Optional[str] = None,
+         revision: Optional[str] = None, digests: Optional[Dict[str, str]] = None,
+         fast: bool = False,
          lang_temperatures: Optional[Dict[str, Dict[str, Any]]] = None,
          hooks=None, on_predict_start=None, on_predict_end=None,
          hooks_raise: bool = True, hooks_concurrent: bool = True) -> Agent:
@@ -925,7 +933,8 @@ def load(model_id_or_path: str = "convaiinnovations/laya", device: Optional[str]
     `hooks` / `on_predict_start` / `on_predict_end` observe or shape every prediction; see
     `laya.hooks`.
     """
-    return Agent(model_id_or_path, device=device, token=token, subfolder=subfolder, fast=fast,
+    return Agent(model_id_or_path, device=device, token=token, subfolder=subfolder,
+                 revision=revision, digests=digests, fast=fast,
                  lang_temperatures=lang_temperatures,
                  hooks=hooks, on_predict_start=on_predict_start, on_predict_end=on_predict_end,
                  hooks_raise=hooks_raise, hooks_concurrent=hooks_concurrent)

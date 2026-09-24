@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from .hooks import HookRegistry, PredictContext, aggregate_usage, compose_hooks, dispatch, normalise_hooks
 from .lang import analyse
+from .model_integrity import default_revision
 
 # The hub repo bundles all three checkpoints; only the requested subfolder is downloaded.
 BUNDLE_REPO = "convaiinnovations/laya"
@@ -204,6 +205,8 @@ class Router(HookRegistry):
         models: Optional[Dict[str, str]] = None,
         device: Optional[str] = None,
         token: Optional[str] = None,
+        revision: Optional[str] = None,
+        digests: Optional[Dict[str, Dict[str, str]]] = None,
         max_loaded: int = 2,
         default: str = "english",
         auto_task_detection: bool = False,
@@ -226,6 +229,8 @@ class Router(HookRegistry):
             self.models.update({normalise_name(k): v for k, v in models.items()})
         self.device = device
         self.token = token or os.environ.get("HF_TOKEN")
+        self.revision = revision
+        self.digests = dict(digests or {})
         self.max_loaded = max(1, int(max_loaded))
         self.default = normalise_name(default)
         self.auto_task_detection = bool(auto_task_detection)
@@ -257,7 +262,11 @@ class Router(HookRegistry):
                 return self._agents[key]
             from .agent import Agent
             repo, sub = _split(self.models[key])
-            agent = Agent(repo, device=self.device, token=self.token, subfolder=sub)
+            agent = Agent(
+                repo, device=self.device, token=self.token, subfolder=sub,
+                revision=self.revision or default_revision(repo, sub),
+                digests=self.digests.get(key),
+            )
             self._agents[key] = agent
             self._order.append(key)
             evicted = self._evict_locked()
