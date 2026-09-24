@@ -11,6 +11,14 @@ from . import tl_kernels as K
 BF = torch.bfloat16
 
 
+def _top_two(probs):
+    """Return two columns for confidence features, including k == 1."""
+    if probs.shape[-1] == 1:
+        top1 = probs[:, 0]
+        return torch.stack([top1, torch.zeros_like(top1)], dim=-1)
+    return probs.topk(2, -1).values
+
+
 def _bucket_n(n):
     return 1 << max(0, (n - 1).bit_length())
 
@@ -190,7 +198,10 @@ class FastLaya:
         p = torch.softmax(logits, -1)
         k = marker_mask.sum(-1).clamp(min=2).float()
         ent = -(p * torch.log(p.clamp_min(1e-9))).sum(-1) / torch.log(k)
-        top2 = p.topk(2, -1).values
+        # Choice questions are allowed to contain one criterion.  The stock
+        # DecisionModel handles that case, but topk(2) raises when the marker
+        # dimension has width one.
+        top2 = _top_two(p)
         feats = torch.stack([top2[:, 0], top2[:, 0] - top2[:, 1], ent, k / 255.0], -1)
         pooled = h[:, 0].float()
         act_logits = m.act_head(torch.cat([pooled, feats], -1))
