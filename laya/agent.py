@@ -205,6 +205,8 @@ class Agent(HookRegistry):
     # without it (for example a hand-constructed runtime in tests).
     amp_enabled = False
     mps_amp_min_rows = MPS_AMP_MIN_ROWS_DEFAULT
+    # The stock forward is also used by lightweight runtimes built with __new__ in tests.
+    _fast = None
 
     def __init__(
         self,
