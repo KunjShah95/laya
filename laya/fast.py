@@ -5,6 +5,7 @@
 Requires CUDA and `pip install laya[fast]` (tilelang).  Falls back to the stock forward otherwise.
 """
 import sys
+import threading
 import torch
 from . import tl_kernels as K
 
@@ -31,6 +32,10 @@ class FastLaya:
         dev = next(model.parameters()).device
         self.dev = dev
         self.use_graphs = use_graphs
+        # CUDA graphs reuse static input/output buffers.  Keep the complete
+        # forward under one lock so concurrent callers cannot overwrite those
+        # buffers between replay and head decoding.
+        self._forward_lock = threading.RLock()
         self.verbose = verbose
         self.H, self.Dh, self.D = cfg.num_attention_heads, cfg.hidden_size // cfg.num_attention_heads, cfg.hidden_size
         self.F = cfg.intermediate_size
@@ -177,6 +182,11 @@ class FastLaya:
     # ------------------------------------------------------------------ DecisionModel.forward replacement
     @torch.no_grad()
     def forward(self, input_ids, attention_mask, marker_pos, marker_mask, qtype, detach_encoder=False):
+        with self._forward_lock:
+            return self._forward_unlocked(input_ids, attention_mask, marker_pos, marker_mask, qtype, detach_encoder)
+
+    @torch.no_grad()
+    def _forward_unlocked(self, input_ids, attention_mask, marker_pos, marker_mask, qtype, detach_encoder=False):
         m = self.m
         N, L0 = input_ids.shape
         g = 16 if L0 <= self.DYNAMIC_MAX_L else self.LONG_BUCKET

@@ -115,7 +115,19 @@ class ONNXAgent(HookRegistry):
             if "CUDAExecutionProvider" in available
             else ["CPUExecutionProvider"]
         )
-        self.session = ort.InferenceSession(onnx_path, providers=providers)
+        try:
+            self.session = ort.InferenceSession(onnx_path, providers=providers)
+        except Exception:
+            # A provider can be listed by onnxruntime yet still fail to initialize
+            # (missing CUDA libraries, unsupported driver, mismatched DLLs).  Keep
+            # the CPU runtime usable instead of making model construction fail.
+            if providers == ["CPUExecutionProvider"]:
+                raise
+            warnings.warn(
+                "laya ONNX: CUDAExecutionProvider initialization failed; falling back to CPUExecutionProvider.",
+                RuntimeWarning, stacklevel=2,
+            )
+            self.session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
 
         self.temperature_raw = self.cfg.get("temperature", [1.0, 1.0, 1.0])
         self.temperature_by_options_raw = self.cfg.get("temperature_by_options", {})

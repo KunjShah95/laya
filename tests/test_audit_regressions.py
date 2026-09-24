@@ -41,6 +41,16 @@ def test_serve_rejects_oversized_stream_without_content_length():
     assert response.status_code == 413
 
 
+def test_serve_lifespan_shuts_down_inference_executor():
+    from fastapi.testclient import TestClient
+    from unittest.mock import patch
+
+    with patch("concurrent.futures.ThreadPoolExecutor.shutdown") as shutdown:
+        with TestClient(create_app(router=FakeRouter())):
+            pass
+    shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
+
 def test_serve_non_ascii_auth_is_401_not_500(monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -159,6 +169,34 @@ def test_remote_redirect_handler_rejects_cross_origin_credentials():
         assert "cross-origin" in str(exc)
     else:
         raise AssertionError("cross-origin redirect was accepted")
+
+
+def test_fast_path_rejects_sequences_over_its_capacity():
+    from types import SimpleNamespace
+
+    import torch
+
+    from laya.agent import Agent
+
+    agent = Agent.__new__(Agent)
+    agent._fast = SimpleNamespace(max_len=16)
+    agent.device = torch.device("cpu")
+    agent.dtype = torch.float32
+    agent.amp_enabled = False
+    agent.mps_amp_min_rows = 5
+    batch = {
+        "input_ids": torch.zeros((1, 17), dtype=torch.long),
+        "attention_mask": torch.ones((1, 17), dtype=torch.long),
+        "marker_pos": torch.zeros((1, 2), dtype=torch.long),
+        "marker_mask": torch.ones((1, 2), dtype=torch.bool),
+        "qtype": torch.zeros((1,), dtype=torch.long),
+    }
+    try:
+        agent._infer(batch)
+    except ValueError as exc:
+        assert "max_len=16" in str(exc)
+    else:
+        raise AssertionError("oversized fast-path request was accepted")
 
 
 def test_fast_top_two_handles_one_option():
